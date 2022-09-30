@@ -1,7 +1,4 @@
-
-//-------------------------------------------------------------------------------------------------------//
-//------------------------------------------------------------------------------------------------------//
-//-------------------------------------------------------------------------------------------------------////Authored by: Daniel J Manla
+//Authored by: Daniel J Manla
 
 #include <Wire.h>                             //I2C
 #include <SPIFFS.h>                           //ESP32 Flash Storage Filesystem  
@@ -15,7 +12,6 @@
 #include <ArduinoNmeaParser.h>                //Parses sentences received from modem GNSS module
 #include "SparkFun_AVR_ISP_Programming.h"     //Used for programming Mega, using ESP32  
 #include "SdFat.h"                            //SdFat by Bill Greiman
-#include <EEPROM.h>
 //---------------------------------------------------------------//
 //------------------------Pin Definitions------------------------//
 //---------------------------------------------------------------//
@@ -34,7 +30,6 @@
 #define MODEM_PWR 4
 #define MODEM_RST 6
 #define MODEM_DTR 38
-#define EEPROM_SIZE 4
 //---------------------------------------------------------------//
 //---------------------------------------------------------------//
 #define THINGSBOARD_CLID "X000_0000"
@@ -53,11 +48,6 @@ ArduinoNmeaParser parser(onRmcUpdate, onGgaUpdate);
 #define NTP_URL "0.pool.ntp.org"
 uint32_t ntpSyncEndTime = 0x00;
 tm CurrentTime;
-//---------------------------------------------------------------//
-//-----------------Automatic Reset Variables---------------------//
-//---------------------------------------------------------------//
-unsigned long modemResetTimer = 0;
-const int rstTime = 14400000;
 //---------------------------------------------------------------//
 //-----------------Web Server Initialization---------------------//
 //---------------------------------------------------------------//
@@ -98,8 +88,8 @@ const uint8_t SD_CS_PIN = SDCARD_SS_PIN;
 SdFat32 sd;
 File32 sdFile;
 //---------------------------------------------------------------//
-//---------------------------------------------------------------------------------------------------------------------//
-//---------------------------------------------------------------------------------------------------------------------//
+//---------------------------------------------------------------//
+//---------------------------------------------------------------//
 #define POLL_TIMEOUT 5000
 bool subscribed = false;
 uint8_t failCount = 0;
@@ -114,16 +104,16 @@ volatile bool modem_DataReceived = false;
 void IRAM_ATTR ModemRX() {
   modem_DataReceived = true;
 }
-//---------------------------------------------------------------------------------------------------------------------//
-//---------------------------------------------------------------------------------------------------------------------//
+//---------------------------------------------------------------//
+//---------------------------------------------------------------//
 
 StaticJsonDocument<2500> keyStorage;
 StaticJsonDocument<500> bufferedKeyStorage;
 StaticJsonDocument<500> configStorage;
 
-//-------------------------------------------------------//
-//---------------------I2C Handlers----------------------//
-//-------------------------------------------------------//
+//---------------------------------------------------------------//
+//-------------------------I2C Handlers--------------------------//
+//---------------------------------------------------------------//
 void IRAM_ATTR i2cReceiveHandler(int numBytes) {
   i2cReceive = numBytes;
   cmdByte = Wire.read();
@@ -148,10 +138,9 @@ void IRAM_ATTR i2cRequestHandler() {
   Wire.write((uint8_t*)keyBuffer, 5);
   Wire.write(cmdValue.asBytes, 4);
 }
-
-//-------------------------------------------------------//
-//-------------------------------------------------------//
-//-------------------------------------------------------//
+//---------------------------------------------------------------//
+//---------------------------------------------------------------//
+//---------------------------------------------------------------//
 bool checkValidKey(char* keyBuffer, int keySize);
 void notFound(AsyncWebServerRequest *request);
 bool checkUserWebAuth(AsyncWebServerRequest * request);
@@ -167,7 +156,6 @@ void dateTime(uint16_t* date, uint16_t* time, uint8_t* ms10) {
   *ms10 = CurrentTime.tm_sec & 1 ? 100 : 0;
 }
 void setup() {
-  EEPROM.begin(EEPROM_SIZE);
   //---------------------------------------------------------------//
   //----------------------Pin Configuration------------------------//
   //---------------------------------------------------------------//
@@ -203,7 +191,7 @@ void setup() {
 
   Wire.onReceive(i2cReceiveHandler);        //Parses packets that are received
   Wire.onRequest(i2cRequestHandler);        //Sends reply
-  attachInterrupt(MODEM_RI, ModemRX, RISING);
+  attachInterrupt(MODEM_RI, ModemRX, FALLING);
   //---------------------------------------------------------------//
   //---------------------------ISP Setup---------------------------//
   //---------------------------------------------------------------//
@@ -313,14 +301,8 @@ void setup() {
     &I2CTaskHandle,   //Task Handle
     1);               //I2C uses Core 1
 
-  int numOfResets = EEPROM.read(10);
-  numOfResets++;
-  EEPROM.write(10,numOfResets);
-  EEPROM.commit();
-  Serial.println(numOfResets);
   while (true) {
     switch (systemState) {
-      modemResetTimer = millis();
       case 0:               //Initialize Modem
         //-----------------------------------------------------------//
         //----------------------Set Baud Rate------------------------//
@@ -517,7 +499,6 @@ void setup() {
           failCount++;
           if (failCount > 1) {
             Serial.println(F("MQTT RST"));
-            failCount = 0;
             systemState = 0xFF;
           }
         }
@@ -526,7 +507,6 @@ void setup() {
       case 9:
         if (modem_DataReceived) {
           modem_DataReceived = false;
-          Serial.println("Case 9");
           modemSerial.setTimeout(50);
           if (modemSerial.find("SMSUB")) {
             Serial.println("SUB MSG");
@@ -555,7 +535,7 @@ void setup() {
           }
         }
 
-        if(failCount > 5){
+        if(failCount > 2){
           systemState = 0xFF;
         }else if(millis() > i2cPollStopTime){
           systemState = 10;
@@ -575,19 +555,17 @@ void setup() {
               Serial.printf("%d/%d/%d|%d:%d:%d\n", CurrentTime.tm_year, CurrentTime.tm_mon, CurrentTime.tm_mday,CurrentTime.tm_hour, CurrentTime.tm_min, CurrentTime.tm_sec);
             }   
           }
-
-          JsonObject temp = bufferedKeyStorage.as<JsonObject>();
-          if (temp && (temp.begin() != temp.end()) && !temp.isNull()) {
+          
+          JsonObject obj  = bufferedKeyStorage.as<JsonObject>();
+          if (obj  && (obj.begin() != obj.end())) {
             Serial.println("SMPUB...");
-            char cmdStr[256];
-            int messageLength = 0;
-            messageLength = measureJson(temp) + 1;
-            Serial.println(numOfResets);  
-            snprintf(cmdStr, 250, "AT+SMPUB=\"%s\",%d,1,0\r\n", configStorage["TOPIC"].as<char*>(), messageLength);
+            char cmdStr[64];
+            int messageLength = measureJson(bufferedKeyStorage) + 1;
+            sprintf(cmdStr, "AT+SMPUB=\"%s\",%d,1,0\r\n", configStorage["TOPIC"].as<char*>(), messageLength);
             if (sim7000.checkSendCmd(cmdStr, ">", 1000)) {
-              serializeJson(temp, modemSerial);
+              serializeJson(bufferedKeyStorage, modemSerial);
               modemSerial.write("\r\n\032");
-              serializeJson(temp, Serial);
+              serializeJson(bufferedKeyStorage, Serial);
               Serial.println();
               bufferedKeyStorage.clear();
 
@@ -610,16 +588,11 @@ void setup() {
               break;
             }
           }
-          if(millis() - modemResetTimer >= rstTime){
-            systemState - 0xFF;
-            break;
-          }
-          else{
-            systemState = 9;
-            break;
-          }
+          systemState = 9;
+          break;
         }
       case 0xFF:
+        failCount = 0;
         systemState = 0;
         keyStorage["REGRX"] = systemState;
         sim7000.restart(MODEM_PWR, MODEM_RST);
